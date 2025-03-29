@@ -4,7 +4,6 @@ cmake_minimum_required(VERSION 3.12)
 add_executable(usb_microphone
     main.c
     usb_descriptors.c
-    usb_microphone.c
 )
 
 target_include_directories(usb_microphone PRIVATE ${CMAKE_CURRENT_LIST_DIR})

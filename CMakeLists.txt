@@ -20,6 +20,21 @@ target_sources(pico_pdm_microphone INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/src/OpenPDM2PCM/OpenPDMFilter.c
 )
 
+
+target_sources(pico_pdm_microphone INTERFACE
+    ${CMAKE_CURRENT_LIST_DIR}/src/rnnoise/src/celt_lpc.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/rnnoise/src/denoise.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/rnnoise/src/kiss_fft.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/rnnoise/src/pitch.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/rnnoise/src/rnn.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/rnnoise/src/rnn_data.c
+)
+
+target_include_directories(pico_pdm_microphone INTERFACE
+    ${CMAKE_CURRENT_LIST_DIR}/src/rnnoise/include
+)
+
+
 target_include_directories(pico_pdm_microphone INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/src/include
 )
@@ -44,3 +59,5 @@ target_link_libraries(pico_analog_microphone INTERFACE pico_stdlib hardware_adc 
 add_subdirectory("examples/hello_analog_microphone")
 add_subdirectory("examples/hello_pdm_microphone")
 add_subdirectory("examples/usb_microphone")
+add_subdirectory("examples/usb_rnnoise_microphone")
+
