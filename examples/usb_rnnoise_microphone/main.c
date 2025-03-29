@@ -57,12 +57,12 @@ enum {
   BLINK_SUSPENDED = 2500,
 };
 
-// 添加麦克风配置
+// Add microphone configuration
 #define PDM_MIC_CLOCK_PIN 22
 #define PDM_MIC_DATA_PIN 21
 #define PDM_MIC_SAMPLE_RATE CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE
 
-// 创建麦克风实例
+// Create microphone instance
 const struct pdm_microphone_config pdm_config = {
     .gpio_data = PDM_MIC_DATA_PIN,
     .gpio_clk = PDM_MIC_CLOCK_PIN,
@@ -72,18 +72,35 @@ const struct pdm_microphone_config pdm_config = {
     .sample_buffer_size = (CFG_TUD_AUDIO_EP_SZ_IN - 2) / 2,
 };
 
-// 缓冲区用于存储麦克风数据
-// 定义缓冲区结构体
+// Buffer to store microphone data
+// Define buffer structure
 typedef struct {
-  int16_t samples[(CFG_TUD_AUDIO_EP_SZ_IN - 2) / 2]; // 样本数据
-  volatile bool ready; // 标记缓冲区是否就绪
+  int16_t samples[(CFG_TUD_AUDIO_EP_SZ_IN - 2) / 2]; // Sample data
+  volatile bool ready; // Flag to indicate if buffer is ready
 } pdm_buffer_t;
 
-// 使用双缓冲区系统
+// Use double buffering system
 #define BUFFER_COUNT 2
 pdm_buffer_t pdm_buffers[BUFFER_COUNT];
 volatile uint8_t current_read_buffer = 0;
 volatile uint8_t current_write_buffer = 0;
+
+
+// RNNoise processor related definitions
+#define FRAME_SIZE 480 // RNNoise processing frame size
+
+// RNNoise processor structure
+typedef struct {
+  DenoiseState *state;                 // RNNoise state
+  float input_frame[FRAME_SIZE];       // Input frame buffer
+  float output_frame[FRAME_SIZE];      // Output frame buffer
+  int16_t sample_buffer[FRAME_SIZE];   // Only store one frame of data
+  int16_t output_buffer[FRAME_SIZE];   // Store processed results
+  int sample_pos;                      // Current sample position
+  float vad;                           // Voice activity detection value
+  bool frame_ready;                    // Flag to indicate if a complete frame is ready for processing
+} rnnoise_processor_t;
+
 
 static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 
@@ -105,36 +122,36 @@ uint16_t test_buffer_audio[(CFG_TUD_AUDIO_EP_SZ_IN - 2) / 2];
 uint16_t startVal = 0;
 
 void led_blinking_task(void);
-void audio_task(void);
+void audio_task(rnnoise_processor_t *processor);
 
 // just for test
-#define SAMPLE_AMPLITUDE 15000 // 合适的振幅值 (接近 int16_t 范围的一半)
-#define WAVE_FREQUENCY 160 // 频率 (Hz)
-static float phase = 0.0f; // 保持相位连续性的变量
+#define SAMPLE_AMPLITUDE 15000 // Suitable amplitude value (close to half of int16_t range)
+#define WAVE_FREQUENCY 160 // Frequency (Hz)
+static float phase = 0.0f; // Variable to maintain phase continuity
 
 void on_pdm_samples_ready() {
-  // 读取当前缓冲区中的样本
+  // Read samples from the current buffer
   pdm_microphone_read(pdm_buffers[current_write_buffer].samples,
                       (CFG_TUD_AUDIO_EP_SZ_IN - 2) / 2);
   // use cosine wave to test
   //  float phase_increment = 2.0f * M_PI * WAVE_FREQUENCY /
   //  PDM_MIC_SAMPLE_RATE; for (size_t i = 0; i < (CFG_TUD_AUDIO_EP_SZ_IN - 2) /
   //  2; i++) {
-  //    // 正弦波生成 (使用固定振幅)
+  //    // Sine wave generation (using fixed amplitude)
   //    pdm_buffers[current_write_buffer].samples[i] =
   //    (int16_t)(SAMPLE_AMPLITUDE * sinf(phase));
 
-  //   // 更新相位，保持连续性
+  //   // Update phase to maintain continuity
   //   phase += phase_increment;
-  //   // 保持相位在 0-2π 范围内，避免浮点精度问题
+  //   // Keep phase within 0-2π range to avoid floating-point precision issues
   //   if (phase >= 2.0f * M_PI) {
   //     phase -= 2.0f * M_PI;
   //   }
   // }
-  // 标记当前缓冲区已准备好
+  // Mark the current buffer as ready
   pdm_buffers[current_write_buffer].ready = true;
 
-  // 切换至下一个写入缓冲区
+  // Switch to the next write buffer
   current_write_buffer = (current_write_buffer + 1) % BUFFER_COUNT;
 }
 
@@ -143,8 +160,9 @@ int main(void) {
   // log to console
   stdio_init_all();
 
-  printf("USB Microphone Example\n");
+  
   board_init();
+  printf("USB RNNoise Microphone Example\n");
 
   // init device stack on configured roothub port
   tusb_rhport_init_t dev_init = {.role = TUSB_ROLE_DEVICE,
@@ -183,6 +201,15 @@ int main(void) {
   }
   memset(test_buffer_audio, 0, sizeof(test_buffer_audio));
 
+  rnnoise_processor_t rnnoise_processor = {0};
+  rnnoise_processor.state = rnnoise_create(NULL);
+  if (!rnnoise_processor.state) {
+    printf("RNNoise initialization failed!\n");
+    while (1) {
+      tight_loop_contents();
+    }
+  }
+
   for (int i = 0; i < BUFFER_COUNT; i++) {
     memset(pdm_buffers[i].samples, 0, sizeof(pdm_buffers[i].samples));
     pdm_buffers[i].ready = false;
@@ -190,17 +217,16 @@ int main(void) {
   current_read_buffer = 0;
   current_write_buffer = 0;
 
-  float x_f32[160]; // 160 samples for 10ms at 16kHz
-  DenoiseState *st = rnnoise_create(NULL);
-
-  // run once to init
-  memset(x_f32, 0x00, sizeof(x_f32));
-  rnnoise_process_frame(st, x_f32, x_f32);
+  printf("USB Microphone Example1\n");
 
   while (1) {
     tud_task(); // tinyusb device task
     led_blinking_task();
-    audio_task();
+    audio_task(&rnnoise_processor);
+  }
+  // never reach here
+  if (rnnoise_processor.state) {
+    rnnoise_destroy(rnnoise_processor.state);
   }
 }
 
@@ -231,31 +257,64 @@ void tud_resume_cb(void) {
 // AUDIO Task
 //--------------------------------------------------------------------+
 
-void audio_task(void) {
-  // static uint32_t boadtime = 0;
-  // 检查当前读取缓冲区是否准备好
-  if (pdm_buffers[current_read_buffer].ready) {
-    // 将样本复制到测试缓冲区
-    for (size_t i = 0; i < (CFG_TUD_AUDIO_EP_SZ_IN - 2) / 2; i++) {
-      // 将int16_t转换为uint16_t，添加偏移将有符号转换为无符号
-      // debug pdm_buffer data, check if the data is correct, every 2s
-      // if (board_millis() - boadtime > 2000) {
-      //   boadtime = board_millis();
-      //   for (int j = 0; j <  10; j++) {
-      //     printf("%d ", pdm_buffers[current_read_buffer].samples[j]);
-      //   }
-      //   printf("\n");
-      // }
-      test_buffer_audio[i] =
-          (uint16_t)(pdm_buffers[current_read_buffer].samples[i]);
-    }
+void audio_task(rnnoise_processor_t *processor) {
+  if (!processor || !processor->state) return;
+  
+  // Check if the current read buffer is ready
+  if (!pdm_buffers[current_read_buffer].ready) return;
 
-    // 标记缓冲区已处理
-    pdm_buffers[current_read_buffer].ready = false;
-
-    // 切换至下一个读取缓冲区
-    current_read_buffer = (current_read_buffer + 1) % BUFFER_COUNT;
+  // PDM data size for this acquisition
+  int pdm_size = (CFG_TUD_AUDIO_EP_SZ_IN - 2) / 2;
+  
+  // Add new data to the accumulation buffer
+  for (int i = 0; i < pdm_size && processor->sample_pos < FRAME_SIZE; i++) {
+    processor->sample_buffer[processor->sample_pos++] = 
+        pdm_buffers[current_read_buffer].samples[i];
   }
+  
+  // Mark buffer as processed
+  pdm_buffers[current_read_buffer].ready = false;
+  current_read_buffer = (current_read_buffer + 1) % BUFFER_COUNT;
+  
+  // If we've accumulated enough samples, process with RNNoise
+  if (processor->sample_pos >= FRAME_SIZE) {
+    // Convert int16 to float
+    for (int i = 0; i < FRAME_SIZE; i++) {
+      processor->input_frame[i] = processor->sample_buffer[i] / 32768.0f;
+    }
+    
+    // Apply RNNoise
+    processor->vad = rnnoise_process_frame(
+        processor->state, processor->output_frame, processor->input_frame);
+    
+    // Convert back to int16 format and store in output buffer
+    for (int i = 0; i < FRAME_SIZE; i++) {
+      float sample = processor->output_frame[i] * 32768.0f;
+      if (sample > 32767.0f) sample = 32767.0f;
+      if (sample < -32768.0f) sample = -32768.0f;
+      processor->output_buffer[i] = (int16_t)sample;
+    }
+    
+    // Processing complete, reset sample position
+    processor->sample_pos = 0;
+    processor->frame_ready = true;
+    
+    // Adjust LED blinking based on VAD
+    blink_interval_ms = (processor->vad > 0.7f) ? 100 : 
+                       (tud_mounted() ? BLINK_MOUNTED : BLINK_NOT_MOUNTED);
+  }
+  
+
+  // Always send processed data to USB
+  if (processor->frame_ready) {
+    // Send processed data to USB
+    for (int i = 0; i < pdm_size; i++) {
+      test_buffer_audio[i] = (uint16_t)(processor->output_buffer[i]);
+    } 
+    // Mark frame as processed
+    processor->frame_ready = false;
+  }
+  // TU_LOG1("VAD: %f\n", processor->vad);
 }
 
 //--------------------------------------------------------------------+
@@ -559,4 +618,13 @@ void led_blinking_task(void) {
 
   board_led_write(led_state);
   led_state = 1 - led_state; // toggle
+
+  //print blink interval ms as status
+  if (blink_interval_ms == BLINK_NOT_MOUNTED) {
+    printf("Device not mounted\n");
+  } else if (blink_interval_ms == BLINK_MOUNTED) {
+    printf("Device mounted\n");
+  } else if (blink_interval_ms == BLINK_SUSPENDED) {
+    printf("Device suspended\n");
+  }
 }
